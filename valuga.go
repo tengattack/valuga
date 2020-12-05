@@ -1,9 +1,12 @@
 package main
 
 import (
+	"flag"
 	"io"
+	"log"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -62,11 +65,30 @@ func transfer(dst io.WriteCloser, src io.ReadCloser) {
 	io.Copy(dst, src)
 }
 
+var (
+	socks5Addr string
+	addr       string
+	staticDir  string
+	hostname   string
+
+	handleStaticDir http.Handler
+)
+
 func serveHTTP(w http.ResponseWriter, req *http.Request) {
+	// skip local hostname (serve static files)
+	if req.Host == hostname {
+		if handleStaticDir == nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		handleStaticDir.ServeHTTP(w, req)
+		return
+	}
+
 	d := &net.Dialer{
 		Timeout: 10 * time.Second,
 	}
-	dialer, _ := proxy.SOCKS5("tcp", "127.0.0.1:1080", nil, d)
+	dialer, _ := proxy.SOCKS5("tcp", socks5Addr, nil, d)
 
 	if req.Method == "CONNECT" {
 		handleTunnel(w, req, dialer)
@@ -76,5 +98,22 @@ func serveHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func main() {
-	http.ListenAndServe("127.0.0.1:8124", http.HandlerFunc(serveHTTP))
+	flag.StringVar(&socks5Addr, "s", "", "socks5 addr")
+	flag.StringVar(&addr, "l", "", "listen addr")
+	flag.StringVar(&staticDir, "w", "", "serve static files")
+	flag.StringVar(&hostname, "h", "", "host name")
+	flag.Parse()
+
+	if socks5Addr == "" || addr == "" || hostname == "" {
+		flag.Usage()
+		os.Exit(1)
+	}
+	if staticDir != "" {
+		handleStaticDir = http.FileServer(http.Dir(staticDir))
+	}
+
+	err := http.ListenAndServe(addr, http.HandlerFunc(serveHTTP))
+	if err != nil {
+		log.Fatal(err)
+	}
 }
