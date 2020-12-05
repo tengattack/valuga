@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -35,6 +36,34 @@ func copyHeader(dst, src http.Header) {
 	}
 }
 
+// TunnelServer .
+type TunnelServer struct {
+	srcConn net.Conn
+	dstConn net.Conn
+
+	closed int64
+}
+
+// Transfer copy dst to src & copy src to dst conn
+func (ts *TunnelServer) Transfer() {
+	go ts.transfer(ts.dstConn, ts.srcConn)
+	go ts.transfer(ts.srcConn, ts.dstConn)
+}
+
+// Close dst & src connection
+func (ts *TunnelServer) Close() {
+	if atomic.AddInt64(&ts.closed, 1) == 1 {
+		_ = ts.dstConn.Close()
+		_ = ts.srcConn.Close()
+	}
+}
+
+func (ts *TunnelServer) transfer(dst io.WriteCloser, src io.ReadCloser) {
+	defer ts.Close()
+
+	io.Copy(dst, src)
+}
+
 func handleTunnel(w http.ResponseWriter, req *http.Request, dialer proxy.Dialer) {
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
@@ -54,15 +83,8 @@ func handleTunnel(w http.ResponseWriter, req *http.Request, dialer proxy.Dialer)
 
 	srcConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 
-	go transfer(dstConn, srcConn)
-	go transfer(srcConn, dstConn)
-}
-
-func transfer(dst io.WriteCloser, src io.ReadCloser) {
-	defer dst.Close()
-	defer src.Close()
-
-	io.Copy(dst, src)
+	ts := TunnelServer{srcConn: srcConn, dstConn: dstConn}
+	ts.Transfer()
 }
 
 var (
